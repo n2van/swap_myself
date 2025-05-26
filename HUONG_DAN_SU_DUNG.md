@@ -82,7 +82,12 @@ python hair_segmentation.py --input anh.jpg --model pretrained/79999_iter.pth --
 - Điều chỉnh độ trong suốt
 - Nhiều màu có sẵn
 
-### 3. Đánh giá độ tin cậy
+### 3. Tách tóc ra ngoài
+- Tách phần tóc thành ảnh riêng biệt
+- Hỗ trợ nền trong suốt (PNG), nền trắng, nền đen
+- Có thể ghép tóc vào ảnh khác
+
+### 4. Đánh giá độ tin cậy
 - Tính toán độ tin cậy của việc phân đoạn
 - Giúp đánh giá chất lượng kết quả
 
@@ -141,7 +146,36 @@ for filename in os.listdir(input_folder):
         cv2.imwrite(output_path, colored)
 ```
 
-### 2. Điều chỉnh tham số
+### 2. Tách tóc ra ngoài
+
+```python
+# Tách tóc với nền trong suốt (PNG)
+segmentator.save_hair_only(image_path, hair_mask, "toc_trong_suot.png", "transparent")
+
+# Tách tóc với nền trắng
+segmentator.save_hair_only(image_path, hair_mask, "toc_nen_trang.jpg", "white")
+
+# Tách tóc với nền đen
+segmentator.save_hair_only(image_path, hair_mask, "toc_nen_den.jpg", "black")
+
+# Lấy ảnh tóc để xử lý thêm
+hair_only = segmentator.extract_hair_only(image_path, hair_mask, "transparent")
+```
+
+### 3. Demo tách tóc
+
+```bash
+python demo_extract_hair.py
+```
+
+Demo sẽ tạo:
+- Tóc với nền trong suốt (PNG)
+- Tóc với nền trắng và đen
+- Tóc tô màu với nền trong suốt
+- Ảnh so sánh các loại tách tóc
+- Tóc ghép lên nền mới
+
+### 4. Điều chỉnh tham số
 
 ```python
 # Thay đổi tỷ lệ pha trộn màu

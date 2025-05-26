@@ -267,6 +267,85 @@ class HairSegmentator:
         colored_image = image * (1 - mask_3d * blend_ratio) + color_overlay * mask_3d * blend_ratio
         
         return colored_image.astype(np.uint8)
+    
+    def extract_hair_only(self, image_path, hair_mask, background_type='transparent'):
+        """
+        Tách phần tóc ra thành ảnh riêng biệt
+        
+        Args:
+            image_path: đường dẫn đến ảnh gốc
+            hair_mask: mask tóc
+            background_type: loại nền ('transparent', 'white', 'black')
+        
+        Returns:
+            ảnh chỉ có phần tóc
+        """
+        # Đọc ảnh gốc
+        if isinstance(image_path, str):
+            image = cv2.imread(image_path)
+        else:
+            image = cv2.cvtColor(np.array(image_path), cv2.COLOR_RGB2BGR)
+        
+        # Đảm bảo mask có cùng kích thước với ảnh
+        if hair_mask.shape[:2] != image.shape[:2]:
+            hair_mask = cv2.resize(hair_mask, (image.shape[1], image.shape[0]), 
+                                 interpolation=cv2.INTER_NEAREST)
+        
+        # Tạo mask 3 kênh
+        mask_3d = cv2.cvtColor(hair_mask, cv2.COLOR_GRAY2BGR) / 255.0
+        
+        if background_type == 'transparent':
+            # Tạo ảnh RGBA (có alpha channel)
+            hair_only = np.zeros((image.shape[0], image.shape[1], 4), dtype=np.uint8)
+            
+            # Copy phần tóc
+            hair_only[:, :, :3] = image * mask_3d
+            
+            # Tạo alpha channel (độ trong suốt)
+            hair_only[:, :, 3] = hair_mask
+            
+            return hair_only
+            
+        elif background_type == 'white':
+            # Nền trắng
+            white_bg = np.ones_like(image) * 255
+            hair_only = image * mask_3d + white_bg * (1 - mask_3d)
+            
+        elif background_type == 'black':
+            # Nền đen
+            black_bg = np.zeros_like(image)
+            hair_only = image * mask_3d + black_bg * (1 - mask_3d)
+            
+        else:
+            raise ValueError("background_type phải là 'transparent', 'white', hoặc 'black'")
+        
+        return hair_only.astype(np.uint8)
+    
+    def save_hair_only(self, image_path, hair_mask, output_path, background_type='transparent'):
+        """
+        Tách và lưu phần tóc ra file riêng
+        
+        Args:
+            image_path: đường dẫn đến ảnh gốc
+            hair_mask: mask tóc
+            output_path: đường dẫn file đầu ra
+            background_type: loại nền ('transparent', 'white', 'black')
+        """
+        hair_only = self.extract_hair_only(image_path, hair_mask, background_type)
+        
+        if background_type == 'transparent':
+            # Lưu dưới dạng PNG để giữ alpha channel
+            if not output_path.lower().endswith('.png'):
+                output_path = output_path.rsplit('.', 1)[0] + '.png'
+            
+            # Chuyển BGRA sang RGBA cho PIL
+            hair_rgba = cv2.cvtColor(hair_only, cv2.COLOR_BGRA2RGBA)
+            pil_image = Image.fromarray(hair_rgba, 'RGBA')
+            pil_image.save(output_path)
+        else:
+            cv2.imwrite(output_path, hair_only)
+        
+        print(f"Đã tách và lưu phần tóc tại: {output_path}")
 
 def main():
     """Hàm demo sử dụng"""

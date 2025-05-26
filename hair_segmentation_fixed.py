@@ -5,73 +5,76 @@ from PIL import Image
 from torchvision import transforms
 import cv2
 import os
+import torchvision.models as models
 
 class ConvBNReLU(nn.Module):
-    def __init__(self, in_chan, out_chan, ks=3, stride=1, padding=1):
-        super().__init__()
-        self.conv = nn.Conv2d(in_chan, out_chan, kernel_size=ks, stride=stride, padding=padding)
+    def __init__(self, in_chan, out_chan, ks=3, stride=1, padding=1, *args, **kwargs):
+        super(ConvBNReLU, self).__init__()
+        self.conv = nn.Conv2d(in_chan, out_chan, kernel_size=ks, stride=stride, padding=padding, bias=False)
         self.bn = nn.BatchNorm2d(out_chan)
         self.relu = nn.ReLU(inplace=True)
-    
+
     def forward(self, x):
-        return self.relu(self.bn(self.conv(x)))
+        x = self.conv(x)
+        x = self.bn(x)
+        x = self.relu(x)
+        return x
 
 class BiSeNetOutput(nn.Module):
-    def __init__(self, in_chan, mid_chan, n_classes):
-        super().__init__()
-        self.conv = ConvBNReLU(in_chan, mid_chan)
+    def __init__(self, in_chan, mid_chan, n_classes, *args, **kwargs):
+        super(BiSeNetOutput, self).__init__()
+        self.conv = ConvBNReLU(in_chan, mid_chan, ks=3, stride=1, padding=1)
         self.conv_out = nn.Conv2d(mid_chan, n_classes, kernel_size=1, bias=False)
-    
+
     def forward(self, x):
-        return self.conv_out(self.conv(x))
+        x = self.conv(x)
+        x = self.conv_out(x)
+        return x
 
 class AttentionRefinementModule(nn.Module):
-    def __init__(self, in_chan, out_chan):
-        super().__init__()
-        self.conv = ConvBNReLU(in_chan, out_chan)
+    def __init__(self, in_chan, out_chan, *args, **kwargs):
+        super(AttentionRefinementModule, self).__init__()
+        self.conv = ConvBNReLU(in_chan, out_chan, ks=3, stride=1, padding=1)
         self.conv_atten = nn.Conv2d(out_chan, out_chan, kernel_size=1, bias=False)
         self.bn_atten = nn.BatchNorm2d(out_chan)
         self.sigmoid_atten = nn.Sigmoid()
-    
+
     def forward(self, x):
         feat = self.conv(x)
-        atten = torch.mean(feat, dim=(2, 3), keepdim=True)
+        atten = nn.functional.adaptive_avg_pool2d(feat, (1, 1))
         atten = self.conv_atten(atten)
         atten = self.bn_atten(atten)
         atten = self.sigmoid_atten(atten)
-        return torch.mul(feat, atten)
+        out = torch.mul(feat, atten)
+        return out
 
 class ContextPath(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.resnet = self._get_resnet18_backbone()
+    def __init__(self, *args, **kwargs):
+        super(ContextPath, self).__init__()
+        self.resnet = models.resnet18(pretrained=True)
         self.arm16 = AttentionRefinementModule(256, 128)
         self.arm32 = AttentionRefinementModule(512, 128)
-        self.conv_head32 = ConvBNReLU(128, 128)
-        self.conv_head16 = ConvBNReLU(128, 128)
-        self.conv_avg = ConvBNReLU(512, 128, ks=1, padding=0)
-    
-    def _get_resnet18_backbone(self):
-        import torchvision.models as models
-        resnet = models.resnet18(pretrained=True)
-        return resnet
-    
+        self.conv_head32 = ConvBNReLU(128, 128, ks=3, stride=1, padding=1)
+        self.conv_head16 = ConvBNReLU(128, 128, ks=3, stride=1, padding=1)
+        self.conv_avg = ConvBNReLU(512, 128, ks=1, stride=1, padding=0)
+
     def forward(self, x):
         x = self.resnet.conv1(x)
         x = self.resnet.bn1(x)
         x = self.resnet.relu(x)
         x = self.resnet.maxpool(x)
-        
-        feat4 = self.resnet.layer1(x)
-        feat8 = self.resnet.layer2(feat4)
-        feat16 = self.resnet.layer3(feat8)
-        feat32 = self.resnet.layer4(feat16)
-        
-        avg = torch.mean(feat32, dim=(2, 3), keepdim=True)
+
+        feat8 = self.resnet.layer1(x)
+        feat16 = self.resnet.layer2(feat8)
+        feat32 = self.resnet.layer3(feat16)
+        feat32 = self.resnet.layer4(feat32)
+
+        avg = nn.functional.adaptive_avg_pool2d(feat32, (1, 1))
         avg = self.conv_avg(avg)
-        
+        avg_up = nn.functional.interpolate(avg, size=feat32.size()[2:], mode='nearest')
+
         feat32_arm = self.arm32(feat32)
-        feat32_sum = feat32_arm + avg
+        feat32_sum = feat32_arm + avg_up
         feat32_up = nn.functional.interpolate(feat32_sum, size=feat16.size()[2:], mode='nearest')
         feat32_up = self.conv_head32(feat32_up)
 
@@ -83,47 +86,48 @@ class ContextPath(nn.Module):
         return feat8, feat16_up, feat32_up
 
 class FeatureFusionModule(nn.Module):
-    def __init__(self, in_chan, out_chan):
-        super().__init__()
-        self.convblk = ConvBNReLU(in_chan, out_chan, ks=1, padding=0)
-        self.conv1 = nn.Conv2d(out_chan, out_chan//4, kernel_size=1, bias=False)
-        self.conv2 = nn.Conv2d(out_chan//4, out_chan, kernel_size=1, bias=False)
+    def __init__(self, in_chan, out_chan, *args, **kwargs):
+        super(FeatureFusionModule, self).__init__()
+        self.convblk = ConvBNReLU(in_chan, out_chan, ks=1, stride=1, padding=0)
+        self.conv1 = nn.Conv2d(out_chan, out_chan//4, kernel_size=1, stride=1, padding=0, bias=False)
+        self.conv2 = nn.Conv2d(out_chan//4, out_chan, kernel_size=1, stride=1, padding=0, bias=False)
         self.relu = nn.ReLU(inplace=True)
         self.sigmoid = nn.Sigmoid()
-    
+
     def forward(self, fsp, fcp):
         fcat = torch.cat([fsp, fcp], dim=1)
         feat = self.convblk(fcat)
-        atten = torch.mean(feat, dim=(2, 3), keepdim=True)
+        atten = nn.functional.adaptive_avg_pool2d(feat, (1, 1))
         atten = self.conv1(atten)
         atten = self.relu(atten)
         atten = self.conv2(atten)
         atten = self.sigmoid(atten)
         feat_atten = torch.mul(feat, atten)
-        return feat_atten + feat
+        feat_out = feat_atten + feat
+        return feat_out
 
 class BiSeNet(nn.Module):
-    def __init__(self, n_classes=19):
-        super().__init__()
+    def __init__(self, n_classes, *args, **kwargs):
+        super(BiSeNet, self).__init__()
         self.cp = ContextPath()
-        self.ffm = FeatureFusionModule(128 + 128, 256)
+        self.ffm = FeatureFusionModule(256, 256)
         self.conv_out = BiSeNetOutput(256, 256, n_classes)
         self.conv_out16 = BiSeNetOutput(128, 64, n_classes)
         self.conv_out32 = BiSeNetOutput(128, 64, n_classes)
-    
+
     def forward(self, x):
         H, W = x.size()[2:]
         feat_res8, feat_cp8, feat_cp16 = self.cp(x)
-        feat_fuse = self.ffm(feat_res8, feat_cp8)
+        feat_sp = feat_res8
+        feat_fuse = self.ffm(feat_sp, feat_cp8)
 
         feat_out = self.conv_out(feat_fuse)
         feat_out16 = self.conv_out16(feat_cp8)
         feat_out32 = self.conv_out32(feat_cp16)
 
-        feat_out = nn.functional.interpolate(feat_out, size=(H, W), mode='bilinear', align_corners=True)
-        feat_out16 = nn.functional.interpolate(feat_out16, size=(H, W), mode='bilinear', align_corners=True)
-        feat_out32 = nn.functional.interpolate(feat_out32, size=(H, W), mode='bilinear', align_corners=True)
-        
+        feat_out = nn.functional.interpolate(feat_out, (H, W), mode='bilinear', align_corners=True)
+        feat_out16 = nn.functional.interpolate(feat_out16, (H, W), mode='bilinear', align_corners=True)
+        feat_out32 = nn.functional.interpolate(feat_out32, (H, W), mode='bilinear', align_corners=True)
         return feat_out, feat_out16, feat_out32
 
 class HairSegmentator:
@@ -138,10 +142,13 @@ class HairSegmentator:
         self.model = BiSeNet(n_classes=19)
         
         if model_path and os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            print(f"Đã tải model từ: {model_path}")
+            try:
+                self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+                print(f"✅ Đã tải model từ: {model_path}")
+            except Exception as e:
+                print(f"❌ Lỗi tải model: {e}")
         else:
-            print("Cảnh báo: Chưa tải model. Vui lòng tải model bằng load_model()")
+            print("⚠️ Cảnh báo: Chưa tải model. Vui lòng tải model bằng load_model()")
         
         self.model.to(self.device)
         self.model.eval()
@@ -155,8 +162,12 @@ class HairSegmentator:
     def load_model(self, model_path):
         """Tải model từ file"""
         if os.path.exists(model_path):
-            self.model.load_state_dict(torch.load(model_path, map_location=self.device))
-            print(f"Đã tải model từ: {model_path}")
+            try:
+                self.model.load_state_dict(torch.load(model_path, map_location=self.device))
+                print(f"✅ Đã tải model từ: {model_path}")
+            except Exception as e:
+                print(f"❌ Lỗi tải model: {e}")
+                raise e
         else:
             raise FileNotFoundError(f"Không tìm thấy file model: {model_path}")
     
@@ -343,6 +354,9 @@ class HairSegmentator:
 
 def main():
     """Hàm demo sử dụng"""
+    print("🎨 Hair Segmentation Demo")
+    print("=" * 40)
+    
     # Khởi tạo bộ phân đoạn tóc
     segmentator = HairSegmentator()
     
@@ -351,19 +365,20 @@ def main():
     if os.path.exists(model_path):
         segmentator.load_model(model_path)
     else:
-        print(f"Vui lòng tải model và đặt tại: {model_path}")
-        print("Link tải: https://drive.google.com/open?id=154JgKpzCPW82qINcVieuPH3fZ2e0P812")
+        print(f"❌ Vui lòng tải model và đặt tại: {model_path}")
+        print("📥 Link tải: https://drive.google.com/open?id=154JgKpzCPW82qINcVieuPH3fZ2e0P812")
         return
     
     # Đường dẫn ảnh đầu vào
     image_path = "input_image.jpg"  # Thay đổi đường dẫn này
     
     if not os.path.exists(image_path):
-        print(f"Không tìm thấy ảnh: {image_path}")
+        print(f"❌ Không tìm thấy ảnh: {image_path}")
+        print("💡 Vui lòng đặt ảnh test với tên 'input_image.jpg'")
         return
     
     # Phân đoạn tóc
-    print("Đang phân đoạn tóc...")
+    print("🔍 Đang phân đoạn tóc...")
     hair_mask = segmentator.segment_hair(image_path)
     
     # Lưu mask
@@ -371,19 +386,22 @@ def main():
     
     # Tô màu tóc
     colors = {
-        'Đỏ': (255, 0, 0),
-        'Xanh lá': (0, 255, 0),
-        'Xanh dương': (0, 0, 255),
-        'Vàng': (255, 255, 0),
-        'Tím': (255, 0, 255),
-        'Nâu': (165, 42, 42)
+        'đỏ': (255, 0, 0),
+        'xanh_la': (0, 255, 0),
+        'xanh_duong': (0, 0, 255),
+        'vàng': (255, 255, 0),
+        'tím': (255, 0, 255),
+        'nâu': (165, 42, 42)
     }
     
+    print("🎨 Đang tạo các màu tóc...")
     for color_name, color_value in colors.items():
         colored_image = segmentator.apply_hair_color(image_path, hair_mask, color_value)
-        output_path = f"hair_colored_{color_name.lower()}.jpg"
+        output_path = f"hair_colored_{color_name}.jpg"
         cv2.imwrite(output_path, colored_image)
-        print(f"Đã tạo ảnh tóc màu {color_name}: {output_path}")
+        print(f"✅ Đã tạo ảnh tóc màu {color_name}: {output_path}")
+    
+    print("\n🎉 Hoàn thành! Kiểm tra các file đầu ra.")
 
 if __name__ == "__main__":
     main()
